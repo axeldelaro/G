@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#120c1a">
+<link rel="manifest" href="/witch/manifest.json">
+<title>Les Treize Voiles</title>
+<style>
+:root{ --safe-t:env(safe-area-inset-top); --safe-b:env(safe-area-inset-bottom); --acc:#b388ff; --will:#5cd6ff; --grip:#ff4d8d; }
+*{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+html,body{margin:0; padding:0; height:100%; background:#0a0710; color:#e8e0f0; font-family:'Georgia','Times New Roman',serif; overflow:hidden;}
+#game{position:fixed; inset:0; display:flex; flex-direction:column;}
+#scene{position:relative; flex:1; overflow:hidden;}
+#bg{position:absolute; inset:0; background-size:cover; background-position:center; transition:opacity .6s; z-index:1;}
+#bg-canvas{position:absolute; inset:0; width:100%; height:100%; z-index:0;}
+#vignette{position:absolute; inset:0; z-index:2; pointer-events:none; background:radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.85) 100%);}
+#cine{position:absolute; inset:0; z-index:50; background:#000; display:none; align-items:center; justify-content:center;}
+#cine video{max-width:100%; max-height:100%;}
+#cine-skip{position:absolute; bottom:max(20px,var(--safe-b)); right:20px; background:rgba(0,0,0,0.6); border:1px solid rgba(255,255,255,0.3); color:#fff; padding:10px 20px; border-radius:20px; font-size:13px; cursor:pointer; z-index:51;}
+
+/* HUD */
+#hud{position:relative; z-index:10; padding:max(10px,var(--safe-t)) 14px 8px; background:linear-gradient(180deg, rgba(10,7,16,0.95), rgba(10,7,16,0)); display:flex; align-items:center; gap:12px; flex-wrap:wrap;}
+.bar-wrap{flex:1; min-width:120px;}
+.bar-lbl{font-size:10px; letter-spacing:1px; opacity:.7; text-transform:uppercase; margin-bottom:2px; display:flex; justify-content:space-between;}
+.bar{height:8px; border-radius:4px; background:rgba(255,255,255,0.1); overflow:hidden;}
+.bar > div{height:100%; transition:width .5s; border-radius:4px;}
+.bar.will > div{background:linear-gradient(90deg,#2a8fc0,var(--will));}
+.bar.grip > div{background:linear-gradient(90deg,#a02050,var(--grip));}
+#lvl-badge{background:rgba(179,136,255,0.2); border:1px solid var(--acc); color:var(--acc); padding:5px 12px; border-radius:16px; font-size:13px; font-weight:bold; white-space:nowrap;}
+#xpbar{height:3px; background:rgba(255,255,255,0.08); position:relative; z-index:10;}
+#xpbar > div{height:100%; background:var(--acc); transition:width .5s;}
+
+/* Panneau texte/choix */
+#panel{position:relative; z-index:10; background:linear-gradient(0deg, rgba(10,7,16,0.97) 70%, rgba(10,7,16,0)); padding:14px 16px max(16px,var(--safe-b)); max-height:55%; overflow-y:auto;}
+#room-title{font-size:13px; letter-spacing:2px; text-transform:uppercase; color:var(--acc); opacity:.85; margin-bottom:6px;}
+#narration{font-size:16px; line-height:1.6; margin-bottom:14px; min-height:40px;}
+#narration .witch-name{color:var(--grip); font-weight:bold;}
+#narration em{color:var(--will); font-style:italic;}
+#choices{display:flex; flex-direction:column; gap:9px;}
+.choice{background:rgba(179,136,255,0.08); border:1px solid rgba(179,136,255,0.3); color:#e8e0f0; padding:13px 16px; border-radius:12px; font-size:15px; font-family:inherit; text-align:left; cursor:pointer; transition:all .15s; display:flex; align-items:center; gap:10px;}
+.choice:active{transform:scale(0.98);}
+.choice:hover{background:rgba(179,136,255,0.16); border-color:var(--acc);}
+.choice.locked{opacity:.4; border-style:dashed; cursor:not-allowed;}
+.choice.danger{border-color:rgba(255,77,141,0.4);}
+.choice .ico{font-size:18px; flex-shrink:0;}
+.choice .sub{font-size:11px; opacity:.6; margin-left:auto;}
+
+/* Boutons système */
+#sysbar{position:absolute; top:max(8px,var(--safe-t)); right:10px; z-index:20; display:flex; gap:6px;}
+.sysb{width:36px; height:36px; border-radius:50%; background:rgba(0,0,0,0.5); border:1px solid rgba(255,255,255,0.15); color:#cbb; font-size:16px; cursor:pointer; display:flex; align-items:center; justify-content:center;}
+
+/* Overlays */
+.overlay{position:fixed; inset:0; z-index:100; background:rgba(8,5,14,0.96); display:none; flex-direction:column; padding:max(40px,var(--safe-t)) 24px max(24px,var(--safe-b)); overflow-y:auto;}
+.overlay.show{display:flex;}
+.overlay h2{color:var(--acc); letter-spacing:2px; font-size:20px; margin:0 0 16px;}
+.inv-item{background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:10px; padding:12px 14px; margin-bottom:8px;}
+.inv-item .it-nom{font-weight:bold; color:var(--acc);}
+.inv-item .it-desc{font-size:13px; opacity:.7; margin-top:3px;}
+.inv-item .it-use{margin-top:8px; background:rgba(92,214,255,0.15); border:1px solid var(--will); color:var(--will); padding:7px 14px; border-radius:8px; font-size:13px; cursor:pointer;}
+.witch-card{display:flex; gap:12px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.1); border-radius:12px; padding:10px; margin-bottom:10px; align-items:center;}
+.witch-card img{width:60px; height:60px; border-radius:8px; object-fit:cover; background:#1a1424; flex-shrink:0;}
+.witch-card .wc-nom{font-weight:bold; font-size:15px;}
+.witch-card .wc-meta{font-size:12px; opacity:.7; margin-top:2px;}
+.witch-card .wc-hint{font-size:12px; color:var(--will); margin-top:4px; font-style:italic;}
+.witch-card.def{border-color:rgba(92,214,255,0.4);}
+.witch-card.mark{border-color:rgba(255,77,141,0.4);}
+.ov-close{margin-top:auto; background:rgba(179,136,255,0.15); border:1px solid var(--acc); color:var(--acc); padding:12px; border-radius:10px; font-size:15px; cursor:pointer;}
+
+/* Titre */
+#title-screen{position:fixed; inset:0; z-index:200; background:radial-gradient(ellipse at center, #1a0f28, #0a0710); display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; text-align:center;}
+#title-screen h1{font-size:34px; letter-spacing:4px; color:var(--acc); margin:0 0 8px; text-shadow:0 0 30px rgba(179,136,255,0.5);}
+#title-screen .sub{opacity:.6; font-size:14px; letter-spacing:3px; margin-bottom:40px;}
+.title-btn{width:100%; max-width:340px; background:rgba(179,136,255,0.1); border:1px solid var(--acc); color:#e8e0f0; padding:16px; border-radius:14px; font-size:16px; font-family:inherit; cursor:pointer; margin-bottom:12px;}
+.title-btn:active{transform:scale(0.98);}
+.origin-desc{font-size:13px; opacity:.6; max-width:340px; margin:-6px 0 18px; line-height:1.5;}
+
+/* Combat */
+#combat-banner{display:none; text-align:center; padding:10px; margin-bottom:12px; border-radius:10px; background:rgba(255,77,141,0.12); border:1px solid rgba(255,77,141,0.4);}
+#combat-banner .cb-role{font-size:12px; color:var(--grip); letter-spacing:1px; text-transform:uppercase;}
+#combat-banner .cb-lvl{font-size:12px; opacity:.7; margin-top:3px;}
+
+#toast{position:fixed; bottom:max(80px,var(--safe-b)); left:50%; transform:translateX(-50%); z-index:300; background:rgba(0,0,0,0.85); color:#fff; padding:12px 22px; border-radius:24px; font-size:14px; opacity:0; transition:opacity .3s; pointer-events:none; max-width:80%; text-align:center;}
+#toast.show{opacity:1;}
+.flash{animation:flash .4s;}
+@keyframes flash{0%{filter:brightness(2.5);}100%{filter:brightness(1);}}
+</style>
+</head>
+<body>
+
+<div id="title-screen">
+  <h1>LES TREIZE VOILES</h1>
+  <div class="sub">UN DOMAINE DONT ON NE RESSORT PAS INTACT</div>
+  <div id="title-buttons"></div>
+</div>
+
+<div id="game" style="display:none;">
+  <div id="scene">
+    <canvas id="bg-canvas"></canvas>
+    <div id="bg"></div>
+    <div id="vignette"></div>
+    <div id="sysbar">
+      <div class="sysb" onclick="openInv()">🎒</div>
+      <div class="sysb" onclick="openGrimoire()">📖</div>
+      <div class="sysb" onclick="saveNow()">💾</div>
+    </div>
+    <div id="cine">
+      <video id="cine-vid" playsinline></video>
+      <div id="cine-skip" onclick="endCine()">Passer ▶</div>
+    </div>
+  </div>
+  <div id="hud">
+    <div id="lvl-badge">Niv 1</div>
+    <div class="bar-wrap"><div class="bar-lbl"><span>Volonté</span><span id="will-num">100</span></div><div class="bar will"><div id="will-bar" style="width:100%"></div></div></div>
+    <div class="bar-wrap"><div class="bar-lbl"><span>Emprise</span><span id="grip-num">0</span></div><div class="bar grip"><div id="grip-bar" style="width:0%"></div></div></div>
+  </div>
+  <div id="xpbar"><div id="xp-bar" style="width:0%"></div></div>
+  <div id="panel">
+    <div id="combat-banner"><div class="cb-role" id="cb-role"></div><div class="cb-lvl" id="cb-lvl"></div></div>
+    <div id="room-title">—</div>
+    <div id="narration">—</div>
+    <div id="choices"></div>
+  </div>
+</div>
+
+<div id="inv-overlay" class="overlay"><h2>🎒 Inventaire</h2><div id="inv-list"></div><div class="ov-close" onclick="closeOv('inv-overlay')">Fermer</div></div>
+<div id="grim-overlay" class="overlay"><h2>📖 Grimoire des Voiles</h2><div id="grim-list"></div><div class="ov-close" onclick="closeOv('grim-overlay')">Fermer</div></div>
+<div id="end-overlay" class="overlay" style="text-align:center; align-items:center; justify-content:center;"><h2 id="end-title"></h2><div id="end-text" style="font-size:17px; line-height:1.7; max-width:480px; margin-bottom:30px;"></div><div class="ov-close" style="max-width:300px;" onclick="location.reload()">Recommencer</div></div>
+
+<div id="toast"></div>
+
+<script>
+// ============ ÉTAT & API ============
+const PROFILE = 'default'; // un seul profil pour l'instant
+let S = null;              // state serveur
+let ASSETS = {images:[], videos:[]};
+let META = null;           // witches, map, items, tactics
+
+async function api(path, body){
+  const r = await fetch('/witch/api/'+path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{})});
+  return r.json();
+}
+
+// ============ DÉMARRAGE ============
+async function boot(){
+  META = await api('meta', {});
+  ASSETS = META.assets || {images:[], videos:[]};
+  const saved = await api('load', {profile:PROFILE});
+  const tb = document.getElementById('title-buttons');
+  tb.innerHTML = '';
+  if(saved && saved.state && !saved.state.ending){
+    let b = document.createElement('button'); b.className='title-btn'; b.textContent='▶ Continuer';
+    b.onclick = ()=>{ S = saved.state; startGame(); }; tb.appendChild(b);
+  }
+  let d1 = document.createElement('div'); d1.className='origin-desc'; d1.textContent="Choisis qui tu es en franchissant le seuil :"; tb.appendChild(d1);
+  let bi = document.createElement('button'); bi.className='title-btn'; bi.innerHTML='⚔️ L\'Intrus <span style="opacity:.6;font-size:13px">— tu résistes</span>';
+  bi.onclick = ()=>newGame('intrus'); tb.appendChild(bi);
+  let di = document.createElement('div'); di.className='origin-desc'; di.textContent="Pleine Volonté, nulle Emprise. Tu es venu prendre, pas céder."; tb.appendChild(di);
+  let bs = document.createElement('button'); bs.className='title-btn'; bs.innerHTML='🕯️ Le Suppliant <span style="opacity:.6;font-size:13px">— tu te soumets</span>';
+  bs.onclick = ()=>newGame('soumis'); tb.appendChild(bs);
+  let ds = document.createElement('div'); ds.className='origin-desc'; ds.textContent="Tu commences déjà marqué — mais certaines portes ne s'ouvrent qu'à ceux qui plient. Une fin t'est réservée."; tb.appendChild(ds);
+}
+
+async function newGame(origin){
+  const r = await api('new', {profile:PROFILE, origin:origin});
+  S = r.state; startGame();
+}
+
+function startGame(){
+  document.getElementById('title-screen').style.display='none';
+  document.getElementById('game').style.display='flex';
+  renderRoom();
+}
+
+// ============ FONDS GÉNÉRÉS ============
+function genBackground(zoneColor, seed){
+  const cv = document.getElementById('bg-canvas');
+  const ctx = cv.getContext('2d');
+  const W = cv.width = cv.offsetWidth, H = cv.height = cv.offsetHeight;
+  let rnd = mulberry(seed);
+  // dégradé de base
+  let g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0, shade(zoneColor, 30));
+  g.addColorStop(1, shade(zoneColor, -40));
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  // motif occulte : arcs/cercles concentriques
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1.5;
+  let cx = W*(0.3+rnd()*0.4), cy = H*(0.3+rnd()*0.4);
+  for(let i=1;i<=7;i++){ ctx.beginPath(); ctx.arc(cx,cy, i*Math.min(W,H)*0.07, 0, Math.PI*2); ctx.stroke(); }
+  // rayons
+  for(let i=0;i<12;i++){ let a=rnd()*Math.PI*2; ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+Math.cos(a)*W, cy+Math.sin(a)*W); ctx.stroke(); }
+  // brume
+  for(let i=0;i<40;i++){ ctx.fillStyle='rgba('+(200)+','+(180)+','+(255)+','+(rnd()*0.03)+')'; let r=rnd()*180+40; ctx.beginPath(); ctx.arc(rnd()*W, rnd()*H, r,0,Math.PI*2); ctx.fill(); }
+  document.getElementById('bg').style.backgroundImage='none';
+  document.getElementById('bg').style.opacity='0';
+}
+function mulberry(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return((t^t>>>14)>>>0)/4294967296; }; }
+function shade(hex,p){ let n=parseInt(hex.slice(1),16),r=(n>>16)+p,g=((n>>8)&255)+p,b=(n&255)+p; r=Math.max(0,Math.min(255,r));g=Math.max(0,Math.min(255,g));b=Math.max(0,Math.min(255,b)); return '#'+((1<<24)+(r<<16)+(g<<8)+b).toString(16).slice(1); }
+
+function showWitchImage(seed){
+  if(!ASSETS.images.length){ return false; }
+  let idx = seed % ASSETS.images.length;
+  document.getElementById('bg').style.backgroundImage = 'url(/f/'+ASSETS.images[idx]+')';
+  document.getElementById('bg').style.opacity = '1';
+  return true;
+}
+
+// ============ CINÉMATIQUES VIDÉO ============
+let cineCb=null;
+function playCine(seed, cb){
+  if(!ASSETS.videos.length){ if(cb)cb(); return; }
+  cineCb = cb;
+  let idx = seed % ASSETS.videos.length;
+  let v = document.getElementById('cine-vid');
+  v.src = '/f/'+ASSETS.videos[idx];
+  document.getElementById('cine').style.display='flex';
+  v.onended = endCine; v.play().catch(()=>endCine());
+}
+function endCine(){
+  let v=document.getElementById('cine-vid'); v.pause(); v.removeAttribute('src'); v.load();
+  document.getElementById('cine').style.display='none';
+  let cb=cineCb; cineCb=null; if(cb)cb();
+}
+
+// ============ RENDU SALLE ============
+function hashStr(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))>>>0; } return h; }
+
+async function renderRoom(){
+  updateHUD();
+  document.getElementById('combat-banner').style.display='none';
+  const r = await api('room', {profile:PROFILE});
+  S = r.state;
+  if(S.ending){ showEnding(S.ending); return; }
+  const room = r.room;
+  document.getElementById('room-title').textContent = r.zoneName + ' · ' + room.nom;
+
+  // Fond : sorcière présente (et pas vaincue) -> son image ; sinon fond généré
+  if(room.witch && !S.defeated.includes(room.witch)){
+    let seed = hashStr(room.witch);
+    if(!showWitchImage(seed)) genBackground(r.zoneColor, seed);
+  } else {
+    genBackground(r.zoneColor, hashStr(S.room));
+  }
+
+  let narr = room.desc;
+  document.getElementById('narration').innerHTML = narr;
+
+  const choicesEl = document.getElementById('choices');
+  choicesEl.innerHTML='';
+
+  // Sorcière non vaincue dans la salle -> rencontre
+  if(room.witch && !S.defeated.includes(room.witch)){
+    const w = META.witches[room.witch];
+    document.getElementById('narration').innerHTML =
+      narr + '<br><br><span class="witch-name">'+w.nom+'</span> se dresse devant toi.<br><em>'+w.intro+'</em>';
+    addChoice('⚔️','Affronter '+w.nom, ()=>startCombat(room.witch), false, false);
+    // fuir possible (revenir)
+    addChoice('🚪','Reculer prudemment', ()=>{ toast('Tu te retires. Elle te laisse partir... pour l\'instant.'); renderRoom(); }, false, true);
+  } else {
+    // Exploration : sorties + fouille + repos
+    if(room.search && !S.flags['searched_'+S.room]){
+      addChoice('🔍','Fouiller la salle', ()=>doSearch(), false, false);
+    }
+    if(!room.witch){
+      addChoice('🕯️','Te reposer (récupérer de la Volonté)', ()=>doRest(), false, false);
+    }
+    for(const ex of r.exits){
+      let label = ex.hidden ? ('✨ '+ex.nom+' (passage caché)') : ex.nom;
+      if(ex.locked){
+        addChoice('🔒', label, null, true, false, lockReason(ex.reason));
+      } else {
+        addChoice('➡️', label, ()=>move(ex.key), false, false);
+      }
+    }
+  }
+}
+
+function lockReason(reason){
+  if(!reason) return 'Verrouillé';
+  let [k,v]=reason.split(':');
+  if(k==='lvl') return 'Niveau '+v+' requis';
+  if(k==='item') return 'Requiert : '+(META.items[v]?META.items[v].nom:v);
+  if(k==='witch') return 'Vaincre '+(META.witches[v]?META.witches[v].nom:v);
+  return 'Verrouillé';
+}
+
+function addChoice(ico, txt, fn, locked, danger, sub){
+  const el = document.createElement('button');
+  el.className='choice'+(locked?' locked':'')+(danger?' danger':'');
+  el.innerHTML='<span class="ico">'+ico+'</span><span>'+txt+'</span>'+(sub?'<span class="sub">'+sub+'</span>':'');
+  if(fn && !locked) el.onclick=fn;
+  document.getElementById('choices').appendChild(el);
+}
+
+async function move(key){
+  const r = await api('move', {profile:PROFILE, to:key});
+  if(!r.ok){ toast(r.msg||'Impossible'); return; }
+  S = r.state; renderRoom();
+}
+
+async function doSearch(){
+  const r = await api('search', {profile:PROFILE});
+  S = r.state;
+  if(r.found){ toast('🔍 Trouvé : '+META.items[r.found].nom); document.getElementById('scene').classList.add('flash'); setTimeout(()=>document.getElementById('scene').classList.remove('flash'),400); }
+  else toast('Rien d\'utile ici.');
+  renderRoom();
+}
+
+async function doRest(){
+  const r = await api('rest', {profile:PROFILE});
+  S = r.state; toast('🕯️ Tu reprends '+r.gain+' de Volonté.'); renderRoom();
+}
+
+// ============ COMBAT ============
+let combatWitch=null;
+async function startCombat(wid){
+  combatWitch = wid;
+  const w = META.witches[wid];
+  document.getElementById('combat-banner').style.display='block';
+  // rôle révélé si on a la connaissance / le tome
+  let known = S.knowledge.includes(wid) || S.inventory.includes('tome');
+  document.getElementById('cb-role').textContent = known ? ('RÔLE : '+w.roleLabel) : 'RÔLE INCONNU';
+  document.getElementById('cb-lvl').textContent = 'Niveau '+w.niveau+' · '+(S.level>=w.niveau?'à ta portée':'au-dessus de toi')+(known?(' — '+w.hint):'');
+  document.getElementById('narration').innerHTML='<span class="witch-name">'+w.nom+'</span><br><em>'+w.desc+'</em><br><br>Comment réagis-tu ?';
+  const choicesEl=document.getElementById('choices'); choicesEl.innerHTML='';
+  // propose la bonne tactique noyée dans des leurres
+  let opts = buildTactics(wid, known);
+  for(const t of opts){
+    addChoice('•', META.tactics[t], ()=>doCombat(wid,t), false, t==='charge'||t==='flee');
+  }
+  // objet utilisable en combat
+  if(S.inventory.includes('ember')){ addChoice('🔥','Utiliser la Braise Ancienne (victoire assurée)', ()=>useEmber(wid), false, false); }
+}
+
+function buildTactics(wid, known){
+  const w = META.witches[wid];
+  let pool = ['resist','observe','defy','patient','refuse','break','trust','split','cut','warm','remember','starve','distance','halftruth','sever','adapt','reverse','submit','flee','charge'];
+  // toujours inclure le bon contre
+  let chosen = new Set([w.counter]);
+  // si on connaît, on présente 3 options dont la bonne ; sinon 5 options
+  let n = known ? 3 : 5;
+  let others = pool.filter(t=>t!==w.counter);
+  shuffle(others);
+  for(let t of others){ if(chosen.size>=n) break; chosen.add(t); }
+  // contre spéciaux nécessitant items
+  let arr=[...chosen];
+  shuffle(arr);
+  return arr;
+}
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ let j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } }
+
+async function doCombat(wid, tactic){
+  const r = await api('combat', {profile:PROFILE, witch:wid, tactic:tactic});
+  S = r.state;
+  const o = r.outcome;
+  document.getElementById('scene').classList.add('flash');
+  setTimeout(()=>document.getElementById('scene').classList.remove('flash'),400);
+  updateHUD();
+  // afficher résultat
+  document.getElementById('choices').innerHTML='';
+  let txt = (o.result==='win'?'<em>Victoire.</em> ':'<em>Tu cèdes du terrain.</em> ') + o.text;
+  document.getElementById('narration').innerHTML = txt;
+  if(S.ending){ setTimeout(()=>showEnding(S.ending), 1500); return; }
+  if(o.result==='win'){
+    playCine(hashStr(wid+'win'), ()=>{ addChoice('➡️','Continuer', ()=>renderRoom()); });
+    if(o.levelup) toast('⬆️ Niveau '+S.level+' !');
+  } else {
+    addChoice('↩️','Te replier et te renforcer', ()=>renderRoom());
+    if(o.marked) toast('💀 '+META.witches[wid].nom+' t\'a marqué. Reviens plus fort.');
+  }
+}
+
+async function useEmber(wid){
+  const r = await api('combat', {profile:PROFILE, witch:wid, tactic:'__ember__'});
+  S=r.state; updateHUD();
+  document.getElementById('choices').innerHTML='';
+  document.getElementById('narration').innerHTML='<em>La Braise s\'embrase.</em> '+META.witches[wid].win;
+  if(S.ending){ setTimeout(()=>showEnding(S.ending),1500); return; }
+  playCine(hashStr(wid+'win'), ()=>addChoice('➡️','Continuer', ()=>renderRoom()));
+}
+
+// ============ HUD ============
+function updateHUD(){
+  if(!S) return;
+  document.getElementById('lvl-badge').textContent='Niv '+S.level;
+  let wp = Math.round(S.will/S.will_max*100);
+  document.getElementById('will-bar').style.width=wp+'%';
+  document.getElementById('will-num').textContent=S.will+'/'+S.will_max;
+  document.getElementById('grip-bar').style.width=S.grip+'%';
+  document.getElementById('grip-num').textContent=S.grip;
+  document.getElementById('xp-bar').style.width=Math.round(S.xp/S.xp_next*100)+'%';
+}
+
+// ============ INVENTAIRE / GRIMOIRE ============
+function openInv(){
+  const el=document.getElementById('inv-list'); el.innerHTML='';
+  if(!S.inventory.length){ el.innerHTML='<div style="opacity:.5">Vide. Fouille les salles.</div>'; }
+  for(const id of S.inventory){
+    const it=META.items[id];
+    let div=document.createElement('div'); div.className='inv-item';
+    div.innerHTML='<div class="it-nom">'+it.nom+'</div><div class="it-desc">'+it.desc+'</div>';
+    if(it.type==='potion'){ let b=document.createElement('button'); b.className='it-use'; b.textContent='Utiliser'; b.onclick=()=>useItem(id); div.appendChild(b); }
+    el.appendChild(div);
+  }
+  document.getElementById('inv-overlay').classList.add('show');
+}
+async function useItem(id){
+  const r=await api('use_item',{profile:PROFILE, item:id});
+  S=r.state; updateHUD(); toast(r.msg||'Utilisé'); closeOv('inv-overlay');
+}
+function openGrimoire(){
+  const el=document.getElementById('grim-list'); el.innerHTML='';
+  let order=Object.values(META.witches).sort((a,b)=>a.niveau-b.niveau);
+  for(const w of order){
+    let known=S.knowledge.includes(w.id)||S.inventory.includes('tome');
+    let def=S.defeated.includes(w.id), mark=S.marks.includes(w.id);
+    let div=document.createElement('div'); div.className='witch-card'+(def?' def':'')+(mark?' mark':'');
+    let imgIdx = ASSETS.images.length ? (hashStr(w.id)%ASSETS.images.length) : -1;
+    let imgTag = imgIdx>=0 ? '<img src="/t/'+ASSETS.images[imgIdx]+'" onerror="this.style.opacity=0">' : '<img>';
+    if(!known){
+      div.innerHTML='<img style="filter:brightness(0.2)"><div><div class="wc-nom" style="opacity:.5">??? '+(def?'(vaincue)':'')+'</div><div class="wc-meta">Niveau '+w.niveau+'</div></div>';
+    } else {
+      div.innerHTML=imgTag+'<div><div class="wc-nom">'+w.nom+(def?' ✓':'')+(mark?' 💀':'')+'</div><div class="wc-meta">Niveau '+w.niveau+' · '+w.roleLabel+'</div><div class="wc-hint">'+w.hint+'</div></div>';
+    }
+    el.appendChild(div);
+  }
+  document.getElementById('grim-overlay').classList.add('show');
+}
+function closeOv(id){ document.getElementById(id).classList.remove('show'); }
+
+async function saveNow(){ await api('save',{profile:PROFILE, state:S}); toast('💾 Partie sauvegardée'); }
+
+function showEnding(end){
+  document.getElementById('end-title').textContent=end.titre;
+  document.getElementById('end-text').textContent=end.texte;
+  document.getElementById('end-overlay').classList.add('show');
+  playCine(hashStr(end.type), ()=>{});
+}
+
+// ============ TOAST ============
+let toastT=null;
+function toast(msg, dur){ const el=document.getElementById('toast'); el.textContent=msg; el.classList.add('show'); if(toastT)clearTimeout(toastT); toastT=setTimeout(()=>el.classList.remove('show'), dur||2200); }
+
+// auto-save périodique
+setInterval(()=>{ if(S && !S.ending) api('save',{profile:PROFILE, state:S}); }, 20000);
+
+// Service worker (requis pour l'installation PWA)
+if('serviceWorker' in navigator){ navigator.serviceWorker.register('/witch/sw.js').catch(()=>{}); }
+
+boot();
+</script>
+</body>
+</html>
