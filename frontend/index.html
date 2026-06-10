@@ -1359,7 +1359,7 @@ async function loadFaceApi() {
         await faceapi.nets.ageGenderNet.loadFromUri(MODEL_URL);
         faceApiLoaded = true;
         console.log("✅ Face API Loaded.");
-        processFaceMask();
+        faceDetectLoop();
     } catch(e) { console.error("Erreur Face API:", e); }
 }
 
@@ -1447,21 +1447,136 @@ function renderMaskEffect(ctx, item, box) {
     }
 }
 
-let isDetectingFace = false;
-async function processFaceMask() {
-    if (!cur || isDetectingFace) { requestAnimationFrame(processFaceMask); return; }
+// --- SUIVI DE VISAGES : tracking lissé par IoU entre détections successives ---
+// Évite le scintillement (snap brutal de la box) et la disparition du masque
+// pendant les latences de détection, en interpolant (EMA) vers la cible et en
+// conservant la dernière position connue pendant une courte période de grâce.
+const FACE_DETECT_INPUT_SIZE = 224;   // résolution d'analyse faceapi (plus grand = détecte mieux les visages de travers)
+const FACE_DETECT_CANVAS_MAX = 320;   // taille max de la frame downscalée envoyée à faceapi (perf constante quelle que soit la résolution source)
+const FACE_DETECT_INTERVAL = 150;     // ms entre deux passes de détection
+const FACE_DETECT_SCORE = 0.15;       // seuil de confiance abaissé : capte plus de visages (profil/incliné)
+const FACE_TRACK_SMOOTH = 0.35;       // lissage EMA de la position/taille de la box
+const FACE_TRACK_GRACE_MS = 600;      // durée de persistance d'un visage perdu temporairement
+const FACE_TRACK_MIN_IOU = 0.2;       // IoU minimal pour associer une détection à un visage déjà suivi
 
-    let isAutoMask = (C.faceMaskEnabled || (inVaultMode && cur.applyVaultMask));
-    let hasCustomBoxes = (globalCustomBoxes.length > 0) || currentDragBox;
+function boxIoU(a, b) {
+    const ax2 = a.x + a.width, ay2 = a.y + a.height;
+    const bx2 = b.x + b.width, by2 = b.y + b.height;
+    const ix1 = Math.max(a.x, b.x), iy1 = Math.max(a.y, b.y);
+    const ix2 = Math.min(ax2, bx2), iy2 = Math.min(ay2, by2);
+    const iw = Math.max(0, ix2 - ix1), ih = Math.max(0, iy2 - iy1);
+    const inter = iw * ih;
+    const union = a.width * a.height + b.width * b.height - inter;
+    return union > 0 ? inter / union : 0;
+}
 
-    if ((!isAutoMask && !hasCustomBoxes) || !cur.maskCanvas) { requestAnimationFrame(processFaceMask); return; }
+// Associe les nouvelles détections aux visages déjà suivis (par recouvrement),
+// puis fait glisser progressivement la box affichée vers la nouvelle cible.
+function updateTrackedFaces(item, detections, now) {
+    item.trackedFaces = item.trackedFaces || [];
+    const used = new Set();
+    detections.forEach(det => {
+        let best = -1, bestIou = FACE_TRACK_MIN_IOU;
+        item.trackedFaces.forEach((tf, i) => {
+            if (used.has(i)) return;
+            const v = boxIoU(tf.box, det);
+            if (v > bestIou) { bestIou = v; best = i; }
+        });
+        if (best >= 0) {
+            const tf = item.trackedFaces[best];
+            tf.box.x += (det.x - tf.box.x) * FACE_TRACK_SMOOTH;
+            tf.box.y += (det.y - tf.box.y) * FACE_TRACK_SMOOTH;
+            tf.box.width += (det.width - tf.box.width) * FACE_TRACK_SMOOTH;
+            tf.box.height += (det.height - tf.box.height) * FACE_TRACK_SMOOTH;
+            tf.landmarks = det.landmarks;
+            tf.lastSeen = now;
+            used.add(best);
+        } else {
+            item.trackedFaces.push({ box: {x: det.x, y: det.y, width: det.width, height: det.height}, landmarks: det.landmarks, lastSeen: now });
+        }
+    });
+    // Visages non revus depuis trop longtemps : on les retire (sinon, on garde
+    // la dernière position connue pour absorber les ratés ponctuels).
+    item.trackedFaces = item.trackedFaces.filter(tf => now - tf.lastSeen < FACE_TRACK_GRACE_MS);
+}
+
+// --- BOUCLE DE DÉTECTION : indépendante du rendu, ne bloque jamais l'affichage ---
+async function runFaceDetection(item, w, h) {
+    try {
+        if (!item._detectCanvas) item._detectCanvas = document.createElement('canvas');
+        const dc = item._detectCanvas;
+        const scale = Math.min(1, FACE_DETECT_CANVAS_MAX / Math.max(w, h));
+        dc.width = Math.max(1, Math.round(w * scale));
+        dc.height = Math.max(1, Math.round(h * scale));
+        dc.getContext('2d').drawImage(item.el, 0, 0, dc.width, dc.height);
+
+        const options = new faceapi.TinyFaceDetectorOptions({ inputSize: FACE_DETECT_INPUT_SIZE, scoreThreshold: FACE_DETECT_SCORE });
+        let detections = await faceapi.detectAllFaces(dc, options).withFaceLandmarks(true).withAgeAndGender();
+        if (cur !== item) return;
+
+        if (detections.length > 0) {
+            const resized = faceapi.resizeResults(detections, { width: w, height: h });
+            const boxes = resized.map(d => {
+                const b = d.detection ? d.detection.box : d.box;
+                return { x: b.x, y: b.y, width: b.width, height: b.height, landmarks: d.landmarks };
+            });
+            updateTrackedFaces(item, boxes, performance.now());
+
+            if (!item.facesSavedToDB && (!item.faces_data || item.faces_data === '')) {
+                let m=0, f=0;
+                detections.forEach(d => { if(d.gender==='male') m++; else f++; });
+                item.demographics = m > f ? 'male' : 'female';
+                let clean_faces = boxes.map(b => ({x: b.x, y: b.y, width: b.width, height: b.height}));
+                item.faces_data = JSON.stringify(clean_faces); item.facesSavedToDB = true;
+                post('/api/save_faces', {file: item.file, faces: clean_faces, demographics: item.demographics}).catch(()=>{});
+            }
+        }
+    } catch(e) {}
+}
+
+async function faceDetectLoop() {
+    try {
+        const item = cur;
+        const isAutoMask = item && (C.faceMaskEnabled || (inVaultMode && item.applyVaultMask));
+        if (item && isAutoMask && item.maskCanvas) {
+            const w = item.video ? item.el.videoWidth : item.el.naturalWidth;
+            const h = item.video ? item.el.videoHeight : item.el.naturalHeight;
+            const ready = !item.video || (!item.el.paused && item.el.readyState >= 2);
+            if (w > 0 && h > 0 && ready) {
+                if (!item.video && item.faces_data && item.faces_data !== '[]' && item.faces_data !== '') {
+                    if (!item._cachedFacesLoaded) {
+                        try {
+                            let cached = typeof item.faces_data === 'string' ? JSON.parse(item.faces_data) : item.faces_data;
+                            const boxes = cached.map(d => { const b = d.box || (d.detection && d.detection.box) || d; return {x: b.x, y: b.y, width: b.width, height: b.height, landmarks: d.landmarks || (d.detection && d.detection.landmarks)}; });
+                            updateTrackedFaces(item, boxes, performance.now());
+                            item._cachedFacesLoaded = true;
+                        } catch(e) {}
+                    }
+                } else {
+                    await runFaceDetection(item, w, h);
+                }
+            }
+        }
+    } catch(e) {}
+    setTimeout(faceDetectLoop, FACE_DETECT_INTERVAL);
+}
+
+// --- BOUCLE DE RENDU : tourne à chaque frame, dessine les boîtes lissées ---
+// sans jamais attendre la détection (élimine le scintillement vidéo).
+function processFaceMask() {
+    requestAnimationFrame(processFaceMask);
+    if (!cur) return;
 
     let item = cur;
-    if (item.video && (item.el.paused || item.el.readyState < 2)) { requestAnimationFrame(processFaceMask); return; }
+    let isAutoMask = (C.faceMaskEnabled || (inVaultMode && item.applyVaultMask));
+    let hasCustomBoxes = (globalCustomBoxes.length > 0) || currentDragBox;
+
+    if ((!isAutoMask && !hasCustomBoxes) || !item.maskCanvas) return;
+    if (item.video && (item.el.paused || item.el.readyState < 2)) return;
 
     const w = item.video ? item.el.videoWidth : item.el.naturalWidth;
     const h = item.video ? item.el.videoHeight : item.el.naturalHeight;
-    if (w === 0 || h === 0) { requestAnimationFrame(processFaceMask); return; }
+    if (w === 0 || h === 0) return;
 
     const canvas = item.maskCanvas;
     if (canvas.width !== w) canvas.width = w;
@@ -1484,53 +1599,20 @@ async function processFaceMask() {
         }
     }
 
-    if (isAutoMask) {
-        isDetectingFace = true;
-        try {
-            if (!item.video && item.faces_data && item.faces_data !== '[]' && item.faces_data !== '') {
-                try { item.lastFaces = typeof item.faces_data === 'string' ? JSON.parse(item.faces_data) : item.faces_data; } catch(e){}
-            } else if (!item._lastDetectTs || performance.now() - item._lastDetectTs > 250) {
-                item._lastDetectTs = performance.now();
-                const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.2 });
-                let detections = await faceapi.detectAllFaces(item.el, options).withFaceLandmarks(true).withAgeAndGender();
-                
-                if (cur === item && detections.length > 0) {
-                    item.lastFaces = faceapi.resizeResults(detections, { width: w, height: h });
-                    
-                    if (!item.facesSavedToDB && (!item.faces_data || item.faces_data === '')) {
-                        let m=0, f=0;
-                        detections.forEach(d => { if(d.gender==='male') m++; else f++; });
-                        let main_demo = m > f ? 'male' : 'female';
-                        item.demographics = main_demo;
-                        
-                        let clean_faces = item.lastFaces.map(d => { let b = d.box || d.detection.box; return {x: b.x, y: b.y, width: b.width, height: b.height}; });
-                        item.faces_data = JSON.stringify(clean_faces); item.facesSavedToDB = true; 
-                        
-                        post('/api/save_faces', {file: item.file, faces: clean_faces, demographics: main_demo}).catch(()=>{});
-                    }
-                }
-            }
-            
-            if (item.lastFaces) {
-                item.lastFaces.forEach(d => {
-                    // Résolution robuste de la box : objets faceapi (live) OU boîtes simples (cache DB)
-                    const box = (d.detection && d.detection.box) || d.box || d;
-                    const landmarks = d.landmarks || (d.detection && d.detection.landmarks);
-                    if (C.maskStyle === 'eye_bar' && landmarks) {
-                        const left = landmarks.getLeftEye(), right = landmarks.getRightEye();
-                        let lx=0, ly=0, rx=0, ry=0;
-                        left.forEach(p=>{lx+=p.x; ly+=p.y;}); lx/=left.length; ly/=left.length;
-                        right.forEach(p=>{rx+=p.x; ry+=p.y;}); rx/=right.length; ry/=right.length;
-                        const angle = Math.atan2(ry - ly, rx - lx), dist = Math.hypot(rx - lx, ry - ly);
-                        ctx.save(); ctx.translate((lx+rx)/2, (ly+ry)/2); ctx.rotate(angle);
-                        ctx.fillStyle = '#050508'; ctx.fillRect(-dist*1.2, -dist*0.5, dist*2.4, dist); ctx.restore();
-                    } else { renderMaskEffect(ctx, item, box); }
-                });
-            }
-        } catch(e) {}
-        isDetectingFace = false;
+    if (isAutoMask && item.trackedFaces) {
+        item.trackedFaces.forEach(tf => {
+            const box = tf.box, landmarks = tf.landmarks;
+            if (C.maskStyle === 'eye_bar' && landmarks) {
+                const left = landmarks.getLeftEye(), right = landmarks.getRightEye();
+                let lx=0, ly=0, rx=0, ry=0;
+                left.forEach(p=>{lx+=p.x; ly+=p.y;}); lx/=left.length; ly/=left.length;
+                right.forEach(p=>{rx+=p.x; ry+=p.y;}); rx/=right.length; ry/=right.length;
+                const angle = Math.atan2(ry - ly, rx - lx), dist = Math.hypot(rx - lx, ry - ly);
+                ctx.save(); ctx.translate((lx+rx)/2, (ly+ry)/2); ctx.rotate(angle);
+                ctx.fillStyle = '#050508'; ctx.fillRect(-dist*1.2, -dist*0.5, dist*2.4, dist); ctx.restore();
+            } else { renderMaskEffect(ctx, item, box); }
+        });
     }
-    requestAnimationFrame(processFaceMask);
 }
 
 function applyMaskConfig() {
@@ -1669,7 +1751,7 @@ function boot() {
     if (!hasBooted) { 
         fetch('/api/stats').then(r=>r.json()).then(showStats).catch(()=>{}); 
         fetch('/api/audio').then(r=>r.json()).then(loadAudioList).catch(()=>{}); 
-        fetchNames(); setupTouch(); setupUnlockPad(); loadFaceApi(); loadConfig();
+        fetchNames(); setupTouch(); setupUnlockPad(); loadFaceApi(); loadConfig(); processFaceMask();
         document.addEventListener('keydown', handleKey); 
         setInterval(() => { if (!isRefilling && (bufs[C.mode]||[]).length < 40) refill(C.mode); }, 15000); 
         history.pushState(null, null, location.href); history.pushState(null, null, location.href); 

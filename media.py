@@ -5,9 +5,12 @@
 import os
 import io
 import time
+import zlib
+import struct
 import random
 import shutil
 import hashlib
+import binascii
 import datetime
 import threading
 import subprocess
@@ -404,12 +407,46 @@ def check_and_set_wallpaper():
 _WITCH_ICON_CACHE = {}
 
 
+def _png_chunk(tag, data):
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", binascii.crc32(tag + data) & 0xffffffff)
+
+
+def _make_simple_png(size, bg=(3, 3, 5), fg=(255, 0, 255)):
+    """Génère une icône PNG minimale (cadre + cercle) sans dépendance externe.
+    Repli utilisé quand Pillow est absent, pour que la PWA reste installable
+    (Chrome exige des icônes PNG valides, pas seulement du SVG)."""
+    cx = cy = size / 2.0
+    r = size * 0.30
+    border = max(2, size // 40)
+    margin = int(size * 0.16)
+    raw = bytearray()
+    for y in range(size):
+        raw.append(0)  # filtre PNG "None"
+        for x in range(size):
+            dx, dy = x - cx, y - cy
+            in_frame = margin <= x < size - margin and margin <= y < size - margin
+            on_ring = in_frame and (x < margin + border or x >= size - margin - border
+                                     or y < margin + border or y >= size - margin - border)
+            if dx * dx + dy * dy <= r * r or on_ring:
+                raw.extend(fg)
+            else:
+                raw.extend(bg)
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    out = b'\x89PNG\r\n\x1a\n'
+    out += _png_chunk(b'IHDR', ihdr)
+    out += _png_chunk(b'IDAT', zlib.compress(bytes(raw), 9))
+    out += _png_chunk(b'IEND', b'')
+    return out
+
+
 def _witch_icon_png(size=512):
     # Génère (et met en cache) une icône PNG pour l'installation PWA.
     if size in _WITCH_ICON_CACHE:
         return _WITCH_ICON_CACHE[size]
     if not HAS_PILLOW:
-        return None
+        png = _make_simple_png(size, bg=(18, 12, 26), fg=(179, 136, 255))
+        _WITCH_ICON_CACHE[size] = png
+        return png
     try:
         from PIL import Image, ImageDraw, ImageFont
         img = Image.new("RGB", (size, size), (18, 12, 26))
@@ -444,7 +481,9 @@ def _gallery_icon_png(size=512):
     if size in _GALLERY_ICON_CACHE:
         return _GALLERY_ICON_CACHE[size]
     if not HAS_PILLOW:
-        return None
+        png = _make_simple_png(size, bg=(3, 3, 5), fg=(255, 0, 255))
+        _GALLERY_ICON_CACHE[size] = png
+        return png
     try:
         from PIL import Image, ImageDraw
         img = Image.new("RGB", (size, size), (3, 3, 5))
