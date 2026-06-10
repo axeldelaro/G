@@ -106,6 +106,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <meta name="theme-color" content="#000000">
 <title>Gallery Pro</title>
 
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Gallery Pro">
+<link rel="apple-touch-icon" href="/icon-192.png">
+
 <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
 
 <style>
@@ -753,8 +759,8 @@ textarea:focus { border-color: var(--a); }
             <button class="tog" onclick="togC('schizoMode',this);"></button>
         </div>
         <div class="row"> 
-            <div class="rl">Effet Time-Smear (Vidéos)</div> 
-            <button class="tog on" onclick="togC('timeSmear',this)"></button> 
+            <div class="rl">Effet Time-Smear (Vidéos)</div>
+            <button class="tog on" onclick="togC('timeSmear',this); if(C.timeSmear && cur && cur.video) loopSmear();"></button>
         </div>
         <div class="row">
             <div class="rl">Time-Smear Exclusif (Dans le masque)</div>
@@ -937,6 +943,7 @@ function updateStability() {
     fill.style.boxShadow = `0 0 15px hsla(${hue}, 100%, 50%, 0.8)`;
 
     let wearRatio = (100 - stability) / 100; // 0.0 (Neuf) -> 1.0 (Détruit)
+    cur.wearRatio = wearRatio;                // mémorisé : pilote la dégradation binaire à la sortie
 
     // HUD Text Glitches
     if (stability > 15) {
@@ -1606,9 +1613,11 @@ async function processFaceMask() {
             
             if (item.lastFaces) {
                 item.lastFaces.forEach(d => {
-                    const box = d.box || d;
-                    if (C.maskStyle === 'eye_bar' && d.landmarks) {
-                        const left = d.landmarks.getLeftEye(), right = d.landmarks.getRightEye();
+                    // Résolution robuste de la box : objets faceapi (live) OU boîtes simples (cache DB)
+                    const box = (d.detection && d.detection.box) || d.box || d;
+                    const landmarks = d.landmarks || (d.detection && d.detection.landmarks);
+                    if (C.maskStyle === 'eye_bar' && landmarks) {
+                        const left = landmarks.getLeftEye(), right = landmarks.getRightEye();
                         let lx=0, ly=0, rx=0, ry=0;
                         left.forEach(p=>{lx+=p.x; ly+=p.y;}); lx/=left.length; ly/=left.length;
                         right.forEach(p=>{rx+=p.x; ry+=p.y;}); rx/=right.length; ry/=right.length;
@@ -1904,6 +1913,14 @@ function show(item) {
     item.el.style.opacity = '1';
     item.moshPrev = null; if (item.wearMosh === undefined) item.wearMosh = 0;
 
+    // Canvas time-smear (z-index 2, derrière la vidéo) : trace fantôme pour les vidéos
+    if (item.video) {
+        item.smearCanvas = document.createElement('canvas');
+        item.smearCanvas.className = 'smear-canvas';
+        nEl.appendChild(item.smearCanvas);
+    } else {
+        item.smearCanvas = null;
+    }
     item.fxCanvas = document.createElement('canvas'); item.fxCanvas.className = 'fx-canvas'; nEl.appendChild(item.fxCanvas);
     let canvas = document.createElement('canvas'); canvas.className = 'mask-canvas'; nEl.appendChild(canvas); item.maskCanvas = canvas;
     item.lastFaces = []; item.customBoxes = item.customBoxes || [];
@@ -1923,6 +1940,8 @@ function show(item) {
     let io = document.getElementById('info-overlay'); if (io) io.style.display = 'none';
     
     applyStealthCanvas(); loopFX();
+    // Time-smear : trace fantôme temps réel sur les vidéos (si activé et aucun FX manuel)
+    if (item.video && C.timeSmear) loopSmear();
 
     if (!burnMode) { incrementView(item, 1); viewInterval = setInterval(() => incrementView(item, 1), 1000); }
 
@@ -2057,7 +2076,10 @@ function triggerWearDamage(item) {
     const dur = Date.now() - item._viewStartTime;
     if (dur < 2000) return;               // visite trop courte (swipe rapide) = pas d'agression
     item._viewStartTime = 0;              // évite le double-déclenchement
-    post('/api/degrade_live', { file: item.file, wear_ratio: 0.5 }).then(res => {
+    // L'intensité suit la stabilité réelle : média instable = dégradation forte ;
+    // média sain (favori/bonne note) = wearRatio bas -> le serveur restaure depuis la sauvegarde.
+    let wr = (typeof item.wearRatio === 'number') ? item.wearRatio : 0.5;
+    post('/api/degrade_live', { file: item.file, wear_ratio: wr }).then(res => {
         // Pour les images, on recharge la <img> pour visualiser la generation loss
         if (res && res.ok && !item.video && item.el) {
             const refreshed = item.file + '?rnd=' + Date.now();
@@ -3608,6 +3630,62 @@ def _witch_icon_png(size=512):
     except Exception:
         return None
 
+_GALLERY_ICON_CACHE = {}
+def _gallery_icon_png(size=512):
+    # Icône PNG (thème magenta) pour l'installation PWA de la galerie principale.
+    if size in _GALLERY_ICON_CACHE:
+        return _GALLERY_ICON_CACHE[size]
+    if not HAS_PILLOW:
+        return None
+    try:
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", (size, size), (3, 3, 5))
+        dr = ImageDraw.Draw(img)
+        m = int(size * 0.16)
+        # Cadre type "photo"
+        dr.rounded_rectangle([m, m, size - m, size - m], radius=int(size*0.10),
+                             outline=(255, 0, 255), width=max(3, size // 40))
+        # Montagne + soleil (pictogramme galerie)
+        dr.ellipse([int(size*0.30), int(size*0.30), int(size*0.42), int(size*0.42)], fill=(255, 0, 255))
+        dr.polygon([(int(size*0.28), int(size*0.70)), (int(size*0.46), int(size*0.46)),
+                    (int(size*0.60), int(size*0.70))], fill=(255, 0, 255))
+        dr.polygon([(int(size*0.50), int(size*0.70)), (int(size*0.64), int(size*0.52)),
+                    (int(size*0.74), int(size*0.70))], fill=(200, 0, 200))
+        import io as _io
+        buf = _io.BytesIO(); img.save(buf, "PNG")
+        _GALLERY_ICON_CACHE[size] = buf.getvalue()
+        return _GALLERY_ICON_CACHE[size]
+    except Exception:
+        return None
+
+GALLERY_ICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">'
+    '<rect width="512" height="512" fill="#030305"/>'
+    '<rect x="82" y="82" width="348" height="348" rx="52" fill="none" stroke="#ff00ff" stroke-width="14"/>'
+    '<circle cx="184" cy="184" r="34" fill="#ff00ff"/>'
+    '<path d="M143 358 L235 235 L307 358 Z" fill="#ff00ff"/>'
+    '<path d="M256 358 L329 266 L380 358 Z" fill="#c800c8"/>'
+    '</svg>'
+)
+
+GALLERY_MANIFEST = {
+    "name": "Gallery Pro",
+    "short_name": "Gallery",
+    "id": "/",
+    "scope": "/",
+    "start_url": "/",
+    "display": "fullscreen",
+    "display_override": ["fullscreen", "standalone"],
+    "orientation": "portrait",
+    "background_color": "#030305",
+    "theme_color": "#000000",
+    "icons": [
+        {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
+        {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+        {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+    ],
+}
+
 def lock_msg(reason):
     if not reason: return "Verrouillé."
     k, v = reason.split(":", 1)
@@ -4723,6 +4801,34 @@ class GalleryHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_response(200); self.send_header('Content-Type','application/javascript')
                 self.send_header('Content-Length', str(len(sw_content))); self.end_headers()
                 self.wfile.write(sw_content); return
+
+            if path == '/manifest.json':
+                b = json.dumps(GALLERY_MANIFEST).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/manifest+json')
+                self.send_header('Content-Length', str(len(b)))
+                self.end_headers(); self.wfile.write(b); return
+
+            if path == '/icon.svg':
+                b = GALLERY_ICON_SVG.encode('utf-8')
+                self.send_response(200); self.send_header('Content-Type', 'image/svg+xml')
+                self.send_header('Cache-Control', 'max-age=86400')
+                self.send_header('Content-Length', str(len(b)))
+                self.end_headers(); self.wfile.write(b); return
+
+            if path in ('/icon-192.png', '/icon-512.png'):
+                size = 192 if path == '/icon-192.png' else 512
+                png = _gallery_icon_png(size)
+                if png:
+                    self.send_response(200); self.send_header('Content-Type', 'image/png')
+                    self.send_header('Cache-Control', 'max-age=86400')
+                    self.send_header('Content-Length', str(len(png)))
+                    self.end_headers(); self.wfile.write(png); return
+                # Repli : renvoyer le SVG si Pillow est absent
+                b = GALLERY_ICON_SVG.encode('utf-8')
+                self.send_response(200); self.send_header('Content-Type', 'image/svg+xml')
+                self.send_header('Content-Length', str(len(b)))
+                self.end_headers(); self.wfile.write(b); return
 
             if path == '/sw.js':
                 sw_content = ("self.addEventListener('install', e => self.skipWaiting());\nself.addEventListener('activate', e => e.waitUntil(clients.claim()));\nself.addEventListener('fetch', e => e.respondWith(fetch(e.request)));\n").encode('utf-8')
