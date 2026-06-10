@@ -895,7 +895,7 @@ let bufs = {all:[], fav:[], image:[], video:[], hist:[], suggest:[]};
 let cur = null, activeSlot = 'a', ssOn = false, ssTimer = null;
 let navH = [], navI = -1, navOpen = false, pin = '', loginDone = false, badPinCount = 0;
 let isLocked = false, lockTaps = 0, lockTimer = null, bgMusicPlaying = false;
-let allKnownNames = [], isRefilling = false, viewInterval = null, wakeLock = null, upin = '';
+let allKnownNames = [], isRefilling = false, viewInterval = null, degradeInterval = null, wakeLock = null, upin = '';
 let pendingSacrifices = 0, inVaultMode = false;
 let savedInfectionCount = 0; 
 let isTransitioning = false; 
@@ -1793,8 +1793,9 @@ function show(item) {
     if (smearRAF) { cancelAnimationFrame(smearRAF); smearRAF = null; } if (stealthRAF) { cancelAnimationFrame(stealthRAF); stealthRAF = null; } if (fxRAF) { cancelAnimationFrame(fxRAF); fxRAF = null; }
     // Dette de temps DÉSACTIVÉE : plus de marquage automatique des médias.
     
-    clearTimeout(ssTimer); ssTimer = null; 
+    clearTimeout(ssTimer); ssTimer = null;
     if (viewInterval) { clearInterval(viewInterval); viewInterval = null; }
+    if (degradeInterval) { clearInterval(degradeInterval); degradeInterval = null; }
     
     if (!burnMode) { post('/api/hist', {file:item.file}).catch(()=>{}); }
     
@@ -1844,6 +1845,14 @@ function show(item) {
     if (item.video && C.timeSmear) loopSmear();
 
     if (!burnMode) { incrementView(item, 1); viewInterval = setInterval(() => incrementView(item, 1), 1000); }
+
+    // Dégradation EN TEMPS RÉEL : le média affiché est corrompu et rechargé
+    // périodiquement, sans attendre next()/prev().
+    if (!burnMode && !galleryMode) {
+        item._degradeInFlight = false;
+        if (item._videoDegradeVersion === undefined) item._videoDegradeVersion = 0;
+        degradeInterval = setInterval(() => liveDegradeTick(item), 1500);
+    }
 
     const bgAud = document.getElementById('bg-audio');
     if (item.video) {
@@ -1963,6 +1972,54 @@ function toggleInfoOverlay() {
     if (cur.tags && cur.tags.length) parts.push(`Tags : ${cur.tags.join(', ')}`);
     ov.innerHTML = parts.join('<br>');
     ov.style.display = 'flex';
+}
+
+// --- DÉGRADATION TEMPS RÉEL : corrompt le fichier sur disque ET recharge le
+// média actuellement affiché, sans navigation. Tourne toutes les 1.5 s tant
+// que le média est à l'écran (cf. degradeInterval, démarré dans show()).
+function liveDegradeTick(item) {
+    if (galleryMode || burnMode) return;       // GALERIE / BURN : aucune dégradation
+    if (cur !== item) return;                  // on ne dégrade que le média actuellement affiché
+    if (item.liked || item.rating === 5) return; // favori / 5★ protégés
+    if (!item.file) return;
+    if (item._degradeInFlight) return;         // évite l'empilement de requêtes (vidéo = lourd)
+
+    let wr = (typeof item.wearRatio === 'number') ? item.wearRatio : 0;
+    item._degradeInFlight = true;
+    post('/api/degrade_live', { file: item.file, wear_ratio: wr }).then(res => {
+        item._degradeInFlight = false;
+        if (!res || !res.ok || cur !== item) return;
+        if (item.video) {
+            if (res.video_version !== undefined && res.video_version !== item._videoDegradeVersion) {
+                item._videoDegradeVersion = res.video_version;
+                reloadDegradedVideo(item);
+            }
+        } else if (res.changed) {
+            reloadDegradedImage(item);
+        }
+    }).catch(() => { item._degradeInFlight = false; });
+}
+
+// Recharge l'image affichée avec la version dégradée écrite sur disque.
+function reloadDegradedImage(item) {
+    if (!item.el) return;
+    try { item.el.src = item.file + '?rnd=' + Date.now(); item._fxDone = false; } catch(e) {}
+}
+
+// Recharge la vidéo affichée avec la passe de dégradation terminée côté
+// serveur, en préservant la position de lecture et l'état play/pause.
+function reloadDegradedVideo(item) {
+    if (!item.el) return;
+    const t = item.el.currentTime || 0;
+    const wasPaused = item.el.paused;
+    const onReady = () => {
+        item.el.removeEventListener('loadedmetadata', onReady);
+        try { item.el.currentTime = t; } catch(e) {}
+        if (!wasPaused) item.el.play().catch(()=>{});
+    };
+    item.el.addEventListener('loadedmetadata', onReady);
+    item.el.src = item.file + '?rnd=' + Date.now();
+    item.el.load();
 }
 
 // Inscription BINAIRE de la dégradation sur le fichier (déclenchée à la sortie du média)

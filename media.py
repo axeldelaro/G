@@ -211,17 +211,16 @@ def _remove_if_exists(*paths):
 # ─── Dégradations ──────────────────────────────────────────────────
 def live_degrade_image(filepath, wear_ratio):
     if not HAS_PILLOW:
-        return
+        return False
     base = filepath[:-EXT_LEN] if filepath.endswith(SVAULT_EXT) else filepath
     ext = os.path.splitext(base)[1].lower()
     if ext not in IMG_EXTS:
-        return
+        return False
     if ext == '.gif':
-        return
+        return False
 
     if float(wear_ratio) <= 0.05:
-        restore_from_backup(filepath)
-        return
+        return restore_from_backup(filepath)
 
     backup_original_once(filepath)
 
@@ -259,12 +258,15 @@ def live_degrade_image(filepath, wear_ratio):
         new_data[:SCRAMBLE_SIZE] = bytearray(xor_chunk(bytes(new_data[:SCRAMBLE_SIZE]), 0))
         with open(filepath, 'wb') as f:
             f.write(new_data)
+        return True
     except Exception as e:
         print(f"Erreur dégradation image: {e}")
+        return False
 
 
 _video_degrade_inflight = set()
 _video_degrade_master_lock = threading.Lock()
+_video_degrade_version = {}
 
 
 def _video_degrade_pass(filepath):
@@ -318,14 +320,20 @@ def schedule_video_degrade(filepath):
         finally:
             with _video_degrade_master_lock:
                 _video_degrade_inflight.discard(filepath)
+                _video_degrade_version[filepath] = _video_degrade_version.get(filepath, 0) + 1
 
     threading.Thread(target=worker, daemon=True).start()
     return True
 
 
+def get_video_degrade_version(filepath):
+    return _video_degrade_version.get(filepath, 0)
+
+
 def live_degrade_video(filepath, wear_ratio):
     if float(wear_ratio) <= 0.05:
-        restore_from_backup(filepath)
+        if restore_from_backup(filepath):
+            _video_degrade_version[filepath] = _video_degrade_version.get(filepath, 0) + 1
         return
     schedule_video_degrade(filepath)
 

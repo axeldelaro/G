@@ -401,16 +401,21 @@ class GalleryHandler(http.server.SimpleHTTPRequestHandler):
                 fp_db = config.FILE_INDEX.get(d.get('file')[3:])
 
             # --- ENDPOINT : DÉGRADATION INCRÉMENTALE (image OU vidéo) ---
+            # Appelé en continu pendant le visionnage : corrompt le fichier sur
+            # disque en place, pour que le client recharge le média dégradé
+            # SANS avoir besoin de naviguer (next/prev).
             if path == '/api/degrade_live':
                 wear_ratio = float(d.get('wear_ratio', 0.0))
+                resp = {'ok': True}
                 if fp_db and os.path.exists(fp_db):
                     base = fp_db[:-EXT_LEN] if fp_db.endswith(SVAULT_EXT) else fp_db
                     ext = os.path.splitext(base)[1].lower()
                     if ext in config.VID_EXTS:
                         live_degrade_video(fp_db, wear_ratio)
+                        resp['video_version'] = media.get_video_degrade_version(fp_db)
                     else:
-                        live_degrade_image(fp_db, wear_ratio)
-                self.send_json({'ok': True})
+                        resp['changed'] = live_degrade_image(fp_db, wear_ratio)
+                self.send_json(resp)
 
             # === API DU JEU "LES TREIZE VOILES" ===
             elif path.startswith('/witch/api/'):
