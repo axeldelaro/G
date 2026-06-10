@@ -3,6 +3,7 @@
 # ═══════════════════════════════════════════════════════════════════
 import os
 import time
+import json
 import sqlite3
 import datetime
 
@@ -62,7 +63,8 @@ def init_db():
         columns = [
             ("corrupted", "INTEGER DEFAULT 0"), ("vault", "INTEGER DEFAULT 0"),
             ("phash", "TEXT DEFAULT ''"), ("views_eq", "INTEGER DEFAULT 0"),
-            ("faces_data", "TEXT DEFAULT ''"), ("demographics", "TEXT DEFAULT ''")
+            ("faces_data", "TEXT DEFAULT ''"), ("demographics", "TEXT DEFAULT ''"),
+            ("burn_regions", "TEXT DEFAULT '[]'")
         ]
         for col, default in columns:
             try:
@@ -175,6 +177,21 @@ def set_rating(path, r):
 def set_note(path, n):
     db_exec("INSERT OR IGNORE INTO media (path) VALUES (?)", (path,))
     db_exec("UPDATE media SET note=? WHERE path=?", (n, path))
+
+
+def get_burn_regions(path):
+    res = db_fetchone("SELECT burn_regions FROM media WHERE path=?", (path,))
+    if not res or not res[0]:
+        return []
+    try:
+        return json.loads(res[0])
+    except (ValueError, TypeError):
+        return []
+
+
+def set_burn_regions(path, regions):
+    db_exec("INSERT OR IGNORE INTO media (path) VALUES (?)", (path,))
+    db_exec("UPDATE media SET burn_regions=? WHERE path=?", (json.dumps(regions), path))
 
 
 def add_hist(path):

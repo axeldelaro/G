@@ -211,15 +211,39 @@ def _remove_if_exists(*paths):
                 pass
 
 
+def _is_burnable_image(filepath):
+    base = filepath[:-EXT_LEN] if filepath.endswith(SVAULT_EXT) else filepath
+    ext = os.path.splitext(base)[1].lower()
+    return ext in IMG_EXTS and ext != '.gif'
+
+
+def _decode_image(filepath):
+    with open(filepath, 'rb') as f:
+        header = f.read(SCRAMBLE_SIZE)
+        rest = f.read()
+    dec_data = xor_chunk(header, 0) + rest
+    img = Image.open(io.BytesIO(dec_data))
+    orig_format = (img.format or 'JPEG').upper()
+    return img.convert('RGB'), orig_format
+
+
+def _encode_image(filepath, img, orig_format):
+    out_io = io.BytesIO()
+    if orig_format == 'PNG':
+        img.save(out_io, format='PNG', optimize=False)
+    else:
+        img.save(out_io, format='JPEG', quality=86)
+    new_data = bytearray(out_io.getvalue())
+    new_data[:SCRAMBLE_SIZE] = bytearray(xor_chunk(bytes(new_data[:SCRAMBLE_SIZE]), 0))
+    with open(filepath, 'wb') as f:
+        f.write(new_data)
+
+
 # ─── Dégradations ──────────────────────────────────────────────────
 def live_degrade_image(filepath, wear_ratio):
     if not HAS_PILLOW:
         return False
-    base = filepath[:-EXT_LEN] if filepath.endswith(SVAULT_EXT) else filepath
-    ext = os.path.splitext(base)[1].lower()
-    if ext not in IMG_EXTS:
-        return False
-    if ext == '.gif':
+    if not _is_burnable_image(filepath):
         return False
 
     if float(wear_ratio) <= 0.05:
@@ -228,42 +252,167 @@ def live_degrade_image(filepath, wear_ratio):
     backup_original_once(filepath)
 
     try:
-        with open(filepath, 'rb') as f:
-            header = f.read(SCRAMBLE_SIZE)
-            rest = f.read()
-        dec_data = xor_chunk(header, 0) + rest
+        img, orig_format = _decode_image(filepath)
 
-        with Image.open(io.BytesIO(dec_data)) as img:
-            orig_format = (img.format or 'JPEG').upper()
-            img = img.convert('RGB')
+        img = ImageEnhance.Color(img).enhance(0.94)
+        img = ImageEnhance.Contrast(img).enhance(1.03)
 
-            img = ImageEnhance.Color(img).enhance(0.94)
-            img = ImageEnhance.Contrast(img).enhance(1.03)
+        W, H = img.size
+        shifts = random.randint(2, 3)
+        for _ in range(shifts):
+            band_y = random.randint(0, max(0, H - 4))
+            band_h = random.randint(2, 5)
+            dx = random.randint(-int(W * 0.025) - 1, int(W * 0.025) + 1)
+            if dx == 0:
+                continue
+            region = img.crop((0, band_y, W, min(H, band_y + band_h)))
+            img.paste(region, (dx, band_y))
 
-            W, H = img.size
-            shifts = random.randint(2, 3)
-            for _ in range(shifts):
-                band_y = random.randint(0, max(0, H - 4))
-                band_h = random.randint(2, 5)
-                dx = random.randint(-int(W * 0.025) - 1, int(W * 0.025) + 1)
-                if dx == 0:
-                    continue
-                region = img.crop((0, band_y, W, min(H, band_y + band_h)))
-                img.paste(region, (dx, band_y))
-
-            out_io = io.BytesIO()
-            if orig_format == 'PNG':
-                img.save(out_io, format='PNG', optimize=False)
-            else:
-                img.save(out_io, format='JPEG', quality=86)
-            new_data = bytearray(out_io.getvalue())
-
-        new_data[:SCRAMBLE_SIZE] = bytearray(xor_chunk(bytes(new_data[:SCRAMBLE_SIZE]), 0))
-        with open(filepath, 'wb') as f:
-            f.write(new_data)
+        _encode_image(filepath, img, orig_format)
         return True
     except Exception as e:
         print(f"Erreur dégradation image: {e}")
+        return False
+
+
+# ─── Brûlures permanentes (Pillow) + réparation par sacrifice ──────
+MAX_BURN_REGIONS = 5
+
+
+def _draw_burn_region(img, rx, ry, rw, rh):
+    """Carbonise une zone rectangulaire (coords normalisées 0-1) : centre
+    noirci, bords roussis avec bruit organique et contour irrégulier.
+    Modifie `img` en place. Effet PERMANENT (écrit sur disque par l'appelant)."""
+    W, H = img.size
+    x, y = int(rx * W), int(ry * H)
+    w, h = max(2, int(rw * W)), max(2, int(rh * H))
+    x, y = min(x, W - 1), min(y, H - 1)
+    w, h = min(w, W - x), min(h, H - y)
+
+    region = img.crop((x, y, x + w, y + h))
+    pixels = region.load()
+    for py in range(h):
+        for px in range(w):
+            nx, ny = (px - w / 2) / (w / 2 + 1e-6), (py - h / 2) / (h / 2 + 1e-6)
+            d = (nx * nx + ny * ny) ** 0.5
+            if d > 1.0 + random.uniform(-0.15, 0.15):
+                continue
+            r, g, b = pixels[px, py]
+            char = max(0.0, 1.0 - d)  # 1 = centre carbonisé, 0 = bord roussi
+            noise = random.randint(-10, 10)
+            if char > 0.6:
+                v = max(0, 5 + noise)
+                pixels[px, py] = (v, v, v)
+            else:
+                f = char / 0.6
+                pixels[px, py] = (int(r * (1 - f) + 40 * f), int(g * (1 - f) + 15 * f), int(b * (1 - f) + 5 * f))
+    img.paste(region, (x, y))
+
+
+def apply_burn_damage(filepath, wear_ratio):
+    """Inflige une brûlure permanente supplémentaire (zone carbonisée) sur
+    l'image si l'usure est suffisante. La zone (coords normalisées) est
+    mémorisée en base pour permettre une réparation ciblée ultérieure via
+    repair_burn_region(). Retourne la liste à jour des zones brûlées, ou
+    None si l'image n'est pas brûlable."""
+    if not HAS_PILLOW or not _is_burnable_image(filepath):
+        return None
+
+    regions = database.get_burn_regions(filepath)
+    if len(regions) >= MAX_BURN_REGIONS:
+        return regions
+
+    backup_original_once(filepath)
+    try:
+        img, orig_format = _decode_image(filepath)
+        rw = min(0.6, random.uniform(0.12, 0.28) * (0.5 + float(wear_ratio)))
+        rh = min(0.6, random.uniform(0.12, 0.28) * (0.5 + float(wear_ratio)))
+        rx = random.uniform(0, max(0.0, 1 - rw))
+        ry = random.uniform(0, max(0.0, 1 - rh))
+        _draw_burn_region(img, rx, ry, rw, rh)
+        _encode_image(filepath, img, orig_format)
+        regions.append({'x': rx, 'y': ry, 'w': rw, 'h': rh})
+        database.set_burn_regions(filepath, regions)
+        return regions
+    except Exception as e:
+        print(f"Erreur brûlure image: {e}")
+        return regions
+
+
+def repair_burn_region(filepath, region_index):
+    """Réécrit les pixels d'une zone brûlée à partir de la sauvegarde
+    d'origine (.sonic_originals) et retire la zone de la liste en base.
+    Retourne la liste à jour des zones brûlées, ou None en cas d'échec."""
+    if not HAS_PILLOW or not _is_burnable_image(filepath):
+        return None
+    regions = database.get_burn_regions(filepath)
+    if region_index < 0 or region_index >= len(regions):
+        return regions
+
+    bkp = _backup_path(filepath)
+    if not os.path.exists(bkp):
+        return regions
+
+    try:
+        img, orig_format = _decode_image(filepath)
+        backup_img, _ = _decode_image(bkp)
+        W, H = img.size
+        if backup_img.size != (W, H):
+            backup_img = backup_img.resize((W, H))
+
+        region = regions[region_index]
+        x, y = int(region['x'] * W), int(region['y'] * H)
+        w, h = max(1, int(region['w'] * W)), max(1, int(region['h'] * H))
+        x, y = min(x, W - 1), min(y, H - 1)
+        w, h = min(w, W - x), min(h, H - y)
+        patch = backup_img.crop((x, y, x + w, y + h))
+        img.paste(patch, (x, y))
+
+        _encode_image(filepath, img, orig_format)
+        regions.pop(region_index)
+        database.set_burn_regions(filepath, regions)
+        return regions
+    except Exception as e:
+        print(f"Erreur réparation brûlure: {e}")
+        return regions
+
+
+def sacrifice_media_violently(filepath):
+    """Destruction violente d'un média, en échange d'une réparation ailleurs.
+    Image : couvre une grande partie du cadre de brûlures massives en une
+    seule passe. Vidéo : double passe de dégradation ffmpeg lourde. Le
+    fichier garde une sauvegarde (.sonic_originals) comme tout le reste du
+    système d'usure, mais devient quasi entièrement carbonisé/illisible."""
+    if not os.path.exists(filepath):
+        return False
+    base = filepath[:-EXT_LEN] if filepath.endswith(SVAULT_EXT) else filepath
+    ext = os.path.splitext(base)[1].lower()
+
+    if ext in VID_EXTS:
+        backup_original_once(filepath)
+        _video_degrade_pass(filepath)
+        _video_degrade_pass(filepath)
+        return True
+
+    if not HAS_PILLOW or not _is_burnable_image(filepath):
+        return False
+
+    backup_original_once(filepath)
+    try:
+        img, orig_format = _decode_image(filepath)
+        regions = database.get_burn_regions(filepath)
+        for _ in range(4):
+            rw = random.uniform(0.35, 0.65)
+            rh = random.uniform(0.35, 0.65)
+            rx = random.uniform(0, max(0.0, 1 - rw))
+            ry = random.uniform(0, max(0.0, 1 - rh))
+            _draw_burn_region(img, rx, ry, rw, rh)
+            regions.append({'x': rx, 'y': ry, 'w': rw, 'h': rh})
+        _encode_image(filepath, img, orig_format)
+        database.set_burn_regions(filepath, regions[-MAX_BURN_REGIONS:])
+        return True
+    except Exception as e:
+        print(f"Erreur sacrifice: {e}")
         return False
 
 

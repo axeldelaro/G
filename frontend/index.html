@@ -137,6 +137,7 @@ body.burn-mode #burn-strobe-js { display: block; }
 .mask-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: var(--fit); pointer-events: none; z-index: 5; }
 .smear-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: var(--fit); pointer-events: none; z-index: 2; }
 .fx-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: var(--fit); pointer-events: none; z-index: 3; }
+.burn-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: var(--fit); pointer-events: none; z-index: 4; }
 .stealth-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: var(--fit); pointer-events: none; z-index: 6; }
 
 #antidote-board-wrap { position: fixed; inset: 0; z-index: 99999999; display: none; align-items: center; justify-content: center; background: rgba(20,0,0,0.98); flex-direction: column; padding: max(30px, var(--safe-t)) 10px max(30px, var(--safe-b)); }
@@ -549,7 +550,18 @@ textarea:focus { border-color: var(--a); }
     </div> 
 </div>
 
-<div class="panel" id="panel-info"> 
+<div class="panel" id="panel-burn">
+    <div class="pbox" style="height:85vh; display:flex; flex-direction:column;">
+        <button class="px" onclick="closePanel('panel-burn')">✕</button>
+        <div class="ptitle">🔥 Réparer la Brûlure</div>
+        <div style="font-size:12px;color:rgba(255,255,255,.6);margin-bottom:14px;text-align:center;line-height:1.5;">
+            Choisissez un média à <b style="color:#ff4444">sacrifier violemment</b> pour réécrire les pixels brûlés de cette zone.
+        </div>
+        <div class="grid" id="burn-sacrifice-wrap" style="flex:1; overflow-y:auto; padding-bottom:20px; align-content:start;"></div>
+    </div>
+</div>
+
+<div class="panel" id="panel-info">
     <div class="pbox"> 
         <button class="px" onclick="closePanel('panel-info')">✕</button> 
         <div class="ptitle">Informations</div> 
@@ -1839,7 +1851,10 @@ async function refill(mode) {
         let url = `/api/batch?mode=${mode}&sort=${C.sort}&minr=${C.minRat}&vault=${inVaultMode}&demo=${C.demoFilter}`; 
         if (C.colorFilter) url += `&color=${encodeURIComponent(C.colorFilter)}`; 
         const r = await fetch(url); const d = await r.json(); 
-        d.forEach(it => { if (!galleryMode && C.hardcore) { if (!it.infected) it.infected = (Math.random() < dynamicVirusRate); } it.saved = false; }); 
+        d.forEach(it => {
+            if (!galleryMode && C.hardcore) { if (!it.infected) it.infected = (Math.random() < dynamicVirusRate); } it.saved = false;
+            try { it.burnRegions = JSON.parse(it.burn_regions || '[]'); } catch(e) { it.burnRegions = []; }
+        });
         bufs[mode] = [...(bufs[mode]||[]), ...d]; 
     } catch(e) {} 
 }
@@ -1872,7 +1887,7 @@ function incrementView(item, amount) {
 function show(item) {
     if (item.applyVaultMask === undefined) { item.applyVaultMask = Math.random() < 0.2; }
     pScale = 1; 
-    if (smearRAF) { cancelAnimationFrame(smearRAF); smearRAF = null; } if (stealthRAF) { cancelAnimationFrame(stealthRAF); stealthRAF = null; } if (fxRAF) { cancelAnimationFrame(fxRAF); fxRAF = null; }
+    if (smearRAF) { cancelAnimationFrame(smearRAF); smearRAF = null; } if (stealthRAF) { cancelAnimationFrame(stealthRAF); stealthRAF = null; } if (fxRAF) { cancelAnimationFrame(fxRAF); fxRAF = null; } if (burnOverlayRAF) { cancelAnimationFrame(burnOverlayRAF); burnOverlayRAF = null; }
     // Dette de temps DÉSACTIVÉE : plus de marquage automatique des médias.
     
     clearTimeout(ssTimer); ssTimer = null;
@@ -1905,6 +1920,7 @@ function show(item) {
         item.smearCanvas = null;
     }
     item.fxCanvas = document.createElement('canvas'); item.fxCanvas.className = 'fx-canvas'; nEl.appendChild(item.fxCanvas);
+    item.burnCanvas = document.createElement('canvas'); item.burnCanvas.className = 'burn-canvas'; nEl.appendChild(item.burnCanvas);
     let canvas = document.createElement('canvas'); canvas.className = 'mask-canvas'; nEl.appendChild(canvas); item.maskCanvas = canvas;
     item.lastFaces = []; item.customBoxes = item.customBoxes || [];
 
@@ -1923,6 +1939,7 @@ function show(item) {
     let io = document.getElementById('info-overlay'); if (io) io.style.display = 'none';
     
     applyStealthCanvas(); loopFX();
+    if (!galleryMode && !burnMode) burnOverlayLoop();
     // Time-smear : trace fantôme temps réel sur les vidéos (si activé et aucun FX manuel)
     if (item.video && C.timeSmear) loopSmear();
 
@@ -2079,6 +2096,7 @@ function liveDegradeTick(item) {
         } else if (res.changed) {
             reloadDegradedImage(item);
         }
+        if (res.burn_regions) { item.burnRegions = res.burn_regions; }
     }).catch(() => { item._degradeInFlight = false; });
 }
 
@@ -2102,6 +2120,124 @@ function reloadDegradedVideo(item) {
     item.el.addEventListener('loadedmetadata', onReady);
     item.el.src = item.file + '?rnd=' + Date.now();
     item.el.load();
+}
+
+// ─── Brûlures permanentes : overlay visuel + réparation par sacrifice ──────
+let burnOverlayRAF = null;
+
+function burnOverlayLoop() {
+    if (!cur) { burnOverlayRAF = null; return; }
+    burnOverlayRAF = requestAnimationFrame(burnOverlayLoop);
+    drawBurnOverlay(cur);
+}
+
+function drawBurnOverlay(item) {
+    if (!item || !item.burnCanvas || !item.el) return;
+    const cvs = item.burnCanvas;
+    const w = item.video ? item.el.videoWidth : item.el.naturalWidth;
+    const h = item.video ? item.el.videoHeight : item.el.naturalHeight;
+    if (!w || !h) return;
+    if (cvs.width !== w) cvs.width = w;
+    if (cvs.height !== h) cvs.height = h;
+    const ctx = cvs.getContext('2d');
+    ctx.clearRect(0, 0, cvs.width, cvs.height);
+    const regions = item.burnRegions || [];
+    if (!regions.length) return;
+    const t = Date.now() / 600;
+    regions.forEach((r, i) => {
+        const x = r.x * w, y = r.y * h, rw = r.w * w, rh = r.h * h;
+        const pulse = 0.5 + 0.5 * Math.sin(t + i * 1.7);
+        ctx.strokeStyle = `rgba(255, ${Math.floor(50 + pulse * 70)}, 0, ${0.45 + pulse * 0.4})`;
+        ctx.lineWidth = Math.max(2, w * 0.005);
+        ctx.setLineDash([w * 0.015, w * 0.01]);
+        ctx.strokeRect(x, y, rw, rh);
+        ctx.setLineDash([]);
+    });
+}
+
+// Convertit des coordonnées écran (tap) en coordonnées normalisées (0-1) dans
+// l'image, en tenant compte de l'object-fit (cover/contain) appliqué au média.
+function mapTapToImageNormalized(cx, cy, item) {
+    if (!item || !item.el) return null;
+    const el = item.el;
+    const rect = el.getBoundingClientRect();
+    const natW = item.video ? el.videoWidth : el.naturalWidth;
+    const natH = item.video ? el.videoHeight : el.naturalHeight;
+    if (!natW || !natH || !rect.width || !rect.height) return null;
+
+    const fit = (getComputedStyle(document.documentElement).getPropertyValue('--fit') || 'contain').trim();
+    const elRatio = rect.width / rect.height, natRatio = natW / natH;
+    let dispW = rect.width, dispH = rect.height, offX = 0, offY = 0;
+
+    if (fit === 'cover') {
+        if (natRatio > elRatio) { dispH = rect.height; dispW = dispH * natRatio; offX = (rect.width - dispW) / 2; }
+        else { dispW = rect.width; dispH = dispW / natRatio; offY = (rect.height - dispH) / 2; }
+    } else {
+        if (natRatio > elRatio) { dispW = rect.width; dispH = dispW / natRatio; offY = (rect.height - dispH) / 2; }
+        else { dispH = rect.height; dispW = dispH * natRatio; offX = (rect.width - dispW) / 2; }
+    }
+
+    const px = cx - rect.left - offX, py = cy - rect.top - offY;
+    if (px < 0 || py < 0 || px > dispW || py > dispH) return null;
+    return { x: px / dispW, y: py / dispH };
+}
+
+function findBurnRegionAt(item, nx, ny) {
+    const regions = item && item.burnRegions;
+    if (!regions || !regions.length) return -1;
+    for (let i = 0; i < regions.length; i++) {
+        const r = regions[i];
+        if (nx >= r.x && nx <= r.x + r.w && ny >= r.y && ny <= r.y + r.h) return i;
+    }
+    return -1;
+}
+
+let burnRepairTarget = null;
+
+// Ouvre le panneau de réparation : choisir un média à sacrifier violemment
+// pour réécrire les pixels de la zone brûlée ciblée.
+function openBurnRepairModal(regionIndex) {
+    if (!cur) return;
+    burnRepairTarget = { file: cur.file, regionIndex };
+    const wrap = document.getElementById('burn-sacrifice-wrap');
+    wrap.innerHTML = '';
+    const pool = (bufs[C.mode] && bufs[C.mode].length) ? bufs[C.mode] : bufs.all;
+    const candidates = (pool || []).filter(it => it.file !== cur.file && !it.error);
+    if (!candidates.length) { toast('☠️ Aucun média disponible pour le sacrifice'); return; }
+
+    const frag = document.createDocumentFragment();
+    candidates.slice(0, 60).forEach(it => {
+        const d = document.createElement('div'); d.className = 'gt';
+        const t = document.createElement('img'); t.src = it.file.replace('/f/', '/t/'); t.loading = 'lazy';
+        t.onerror = function() { this.onerror = null; this.src = 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100"><text x="50%" y="50%" dominant-baseline="central" text-anchor="middle" font-size="40">⏳</text></svg>'; };
+        d.appendChild(t);
+        const ov = document.createElement('div'); ov.className = 'gt-ov'; ov.style.background = 'rgba(255,40,0,0.35)'; d.appendChild(ov);
+        if (it.video) { const v = document.createElement('span'); v.className = 'gt-vid'; v.textContent = '🎬'; d.appendChild(v); }
+        const skull = document.createElement('span'); skull.style.cssText = 'position:absolute;top:6px;left:6px;font-size:14px;text-shadow:0 1px 4px rgba(0,0,0,0.9);'; skull.textContent = '💀'; d.appendChild(skull);
+        d.onclick = () => confirmBurnSacrifice(it);
+        frag.appendChild(d);
+    });
+    wrap.appendChild(frag);
+    openPanel('burn');
+}
+
+function confirmBurnSacrifice(victim) {
+    if (!burnRepairTarget) return;
+    if (!confirm('⚠️ Sacrifier DÉFINITIVEMENT ce média pour réécrire la zone brûlée ?\nIl sera détruit violemment et irrémédiablement.')) return;
+    const target = burnRepairTarget;
+    post('/api/repair_burn', { file: target.file, region_index: target.regionIndex, sacrifice_file: victim.file }).then(res => {
+        if (res && res.ok) {
+            if (cur && cur.file === target.file) {
+                cur.burnRegions = res.burn_regions || [];
+                reloadDegradedImage(cur);
+            }
+            toast('🩹 Zone réécrite... au prix d\'un sacrifice.', 2500);
+            closePanel('panel-burn');
+        } else {
+            toast('❌ Échec de la réparation');
+        }
+    }).catch(() => toast('❌ Erreur réseau'));
+    burnRepairTarget = null;
 }
 
 // Inscription BINAIRE de la dégradation sur le fichier (déclenchée à la sortie du média)
@@ -2531,7 +2667,7 @@ function updateNameDatalist() { const dl = document.getElementById('known-names'
 
 function toggleFS() { if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(()=>{}); else document.exitFullscreen().catch(()=>{}); }
 
-const PANELS = ['panel-grid','panel-info','panel-cfg','panel-filter'];
+const PANELS = ['panel-grid','panel-info','panel-cfg','panel-filter','panel-burn'];
 function closePanel(id) { document.getElementById(id).classList.remove('on'); resetUI(); } 
 function closeAllPanels() { PANELS.forEach(closePanel); } 
 function anyPanel() { return PANELS.some(id => document.getElementById(id).classList.contains('on')); }
@@ -2614,10 +2750,17 @@ function setupTouch() {
         } 
         lastTap = now;
         
-        if (adx<15 && ady<15) { 
-            if (navOpen) { closeNav(); return; } if (quickFxOpen) { toggleQuickFX(); return; } if (anyPanel()) { closeAllPanels(); return; } 
-            if (cx < window.innerWidth * 0.3) { prev(); } else if (cx > window.innerWidth * 0.7) { next(); } else toggleImmersive(); return; 
-        } 
+        if (adx<15 && ady<15) {
+            if (navOpen) { closeNav(); return; } if (quickFxOpen) { toggleQuickFX(); return; } if (anyPanel()) { closeAllPanels(); return; }
+            if (cur && !cur.video && cur.burnRegions && cur.burnRegions.length) {
+                const norm = mapTapToImageNormalized(cx, cy, cur);
+                if (norm) {
+                    const idx = findBurnRegionAt(cur, norm.x, norm.y);
+                    if (idx >= 0) { openBurnRepairModal(idx); return; }
+                }
+            }
+            if (cx < window.innerWidth * 0.3) { prev(); } else if (cx > window.innerWidth * 0.7) { next(); } else toggleImmersive(); return;
+        }
         
         if (ady > 70 && ady > adx * 1.5) { 
             if (C.stealthMode !== 'none') return; 

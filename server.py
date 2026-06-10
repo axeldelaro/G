@@ -89,14 +89,14 @@ class GalleryHandler(http.server.SimpleHTTPRequestHandler):
 
                 with INDEX_LOCK: pool = list(config.MEDIA_FILES)
 
-                rows = db_fetch("SELECT path, views, rating, liked, r, g, b, corrupted, vault, phash, faces_data, demographics FROM media")
+                rows = db_fetch("SELECT path, views, rating, liked, r, g, b, corrupted, vault, phash, faces_data, demographics, burn_regions FROM media")
                 db_cache = {r[0]: {
                     'views': r[1], 'rating': r[2], 'liked': bool(r[3]),
                     'color': [r[4],r[5],r[6]] if r[4] != -1 else None,
                     'corrupted': bool(r[7]), 'vault': bool(r[8]), 'phash': r[9],
-                    'faces_data': r[10], 'demographics': r[11]
+                    'faces_data': r[10], 'demographics': r[11], 'burn_regions': r[12]
                 } for r in rows}
-                def get_d(f): return db_cache.get(f, {'views':0,'rating':0,'liked':False,'color':None,'corrupted':False,'vault':False,'phash':'','faces_data':'','demographics':''})
+                def get_d(f): return db_cache.get(f, {'views':0,'rating':0,'liked':False,'color':None,'corrupted':False,'vault':False,'phash':'','faces_data':'','demographics':'','burn_regions':'[]'})
 
                 if vault_req: pool = [f for f in pool if get_d(f)['vault']]
                 else: pool = [f for f in pool if not get_d(f)['corrupted'] and not get_d(f)['vault']]
@@ -152,6 +152,7 @@ class GalleryHandler(http.server.SimpleHTTPRequestHandler):
                         'liked': d['liked'], 'tags': tags_map.get(f, []), 'names': names_map.get(f, []),
                         'rating': d['rating'], 'note': notes_map.get(f, ''), 'views': d['views'], 'video': is_obfuscated_video(f),
                         'faces_data': d['faces_data'], 'demographics': d['demographics'],
+                        'burn_regions': d['burn_regions'] or '[]',
                         'size': config.FILE_SIZE.get(f, 0),
                         'ctime': config.FILE_CTIME.get(f, 0)
                     })
@@ -415,7 +416,37 @@ class GalleryHandler(http.server.SimpleHTTPRequestHandler):
                         resp['video_version'] = media.get_video_degrade_version(fp_db)
                     else:
                         resp['changed'] = live_degrade_image(fp_db, wear_ratio)
+                        # Au-delà d'un certain seuil d'usure, chance de carboniser
+                        # une nouvelle zone PERMANENTE (réparable plus tard via sacrifice).
+                        if wear_ratio > 0.5 and random.random() < 0.05:
+                            burned = media.apply_burn_damage(fp_db, wear_ratio)
+                            if burned is not None:
+                                resp['burn_regions'] = burned
                 self.send_json(resp)
+
+            # --- ENDPOINT : ÉTAT DES BRÛLURES PERMANENTES D'UN MÉDIA ---
+            elif path == '/api/burn_status':
+                regions = database.get_burn_regions(fp_db) if fp_db else []
+                self.send_json({'ok': True, 'burn_regions': regions})
+
+            # --- ENDPOINT : RÉPARATION D'UNE BRÛLURE PAR SACRIFICE ---
+            # Réécrit les pixels d'une zone carbonisée à partir de la sauvegarde
+            # d'origine, en échange de la destruction violente d'un autre média
+            # choisi par le joueur (sacrifice_file).
+            elif path == '/api/repair_burn':
+                region_index = int(d.get('region_index', -1))
+                sacrifice_fp = None
+                if d.get('sacrifice_file') and str(d.get('sacrifice_file')).startswith('/f/'):
+                    sacrifice_fp = config.FILE_INDEX.get(d.get('sacrifice_file')[3:])
+
+                if not fp_db or not os.path.exists(fp_db):
+                    self.send_json({'ok': False, 'err': 'Média introuvable'})
+                elif not sacrifice_fp or not os.path.exists(sacrifice_fp) or sacrifice_fp == fp_db:
+                    self.send_json({'ok': False, 'err': 'Sacrifice invalide'})
+                else:
+                    media.sacrifice_media_violently(sacrifice_fp)
+                    regions = media.repair_burn_region(fp_db, region_index)
+                    self.send_json({'ok': regions is not None, 'burn_regions': regions or []})
 
             # === API DU JEU "LES TREIZE VOILES" ===
             elif path.startswith('/witch/api/'):
